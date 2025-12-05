@@ -66,6 +66,10 @@ export default function AdminDashboard() {
   // delete-mode toggles shown at section headings (right side)
   const [showDeleteUsers, setShowDeleteUsers] = useState(false);
   const [showDeleteTasks, setShowDeleteTasks] = useState(false);
+  // Hide user feature
+  const [showHideUserMode, setShowHideUserMode] = useState(false);
+  const [hiddenUserIds, setHiddenUserIds] = useState([]);
+  const [showHiddenList, setShowHiddenList] = useState(false);
 
   // UI view state: 'progress' | 'alltasks' | 'members'
   const [activeView, setActiveView] = useState("progress");
@@ -161,11 +165,33 @@ export default function AdminDashboard() {
 
     setLoading(false);
 
+    // Load hidden users from localStorage (persist across reloads)
+    const stored = localStorage.getItem("hiddenUserIds");
+    if (stored) {
+      try {
+        setHiddenUserIds(JSON.parse(stored));
+      } catch {}
+    }
+
     return () => {
       unsubscribeUsers();
       unsubscribeTasks();
     };
   }, []);
+
+  // Persist hiddenUserIds to localStorage
+  useEffect(() => {
+    localStorage.setItem("hiddenUserIds", JSON.stringify(hiddenUserIds));
+  }, [hiddenUserIds]);
+  // Hide user (move to hidden list)
+  const hideUser = (userId) => {
+    setHiddenUserIds((prev) => [...prev, userId]);
+  };
+
+  // Unhide user (move back to visible)
+  const unhideUser = (userId) => {
+    setHiddenUserIds((prev) => prev.filter((id) => id !== userId));
+  };
 
   // 🔹 Add new employee
   const addEmployee = async (e) => {
@@ -307,8 +333,28 @@ export default function AdminDashboard() {
       const resp = await fetch('/api/admin/deleteUser', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: userId, email: userEmail }) });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Delete failed');
-      alert('User removed. Server deletion complete.');
-      // onSnapshot listeners will update UI automatically
+      
+      // Immediately update UI - remove user from state
+      setUsers((prevUsers) => prevUsers.filter((u) => u.id !== userId));
+      
+      // Remove all tasks assigned to this user from state
+      setTasks((prevTasks) => prevTasks.filter((t) => {
+        return !(t.assignedTo === userId || (userEmail && t.assignedEmail === userEmail));
+      }));
+      
+      // Clean up actualStatusMap for deleted tasks
+      setActualStatusMap((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((taskId) => {
+          // Check if this task still exists in the tasks list
+          if (!tasks.find((t) => t.id === taskId)) {
+            delete next[taskId];
+          }
+        });
+        return next;
+      });
+      
+      alert('User and all related tasks removed successfully!');
     } catch (err) {
       console.error(err);
       alert('Delete failed: ' + (err.message || err));
@@ -321,6 +367,17 @@ export default function AdminDashboard() {
     if (!ok) return;
     try {
       await deleteDoc(doc(db, "tasks", taskId));
+      
+      // Immediately update UI - remove task from state
+      setTasks((prevTasks) => prevTasks.filter((t) => t.id !== taskId));
+      
+      // Clean up actualStatusMap
+      setActualStatusMap((prev) => {
+        const next = { ...prev };
+        delete next[taskId];
+        return next;
+      });
+      
       alert("Task removed.");
     } catch (err) {
       alert("Delete failed: " + err.message);
@@ -997,7 +1054,7 @@ export default function AdminDashboard() {
                     }
                   }} className="border p-2 w-full mb-3 rounded appearance-none">
                     <option value="">-- Select member --</option>
-                    {users.map((u) => (
+                    {users.filter((u) => !hiddenUserIds.includes(u.id)).map((u) => (
                       <option key={u.id} value={u.id}>
                         {u.name ? `${u.name} (${u.email})` : u.email}
                       </option>
@@ -1253,15 +1310,51 @@ export default function AdminDashboard() {
           <h2 className="text-xl font-semibold">👥 All Users</h2>
           <div className="flex items-center gap-3">
             <button onClick={() => setShowDeleteUsers((s) => !s)} className={`text-sm px-3 py-1 rounded ${showDeleteUsers ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-700"}`}>{showDeleteUsers ? "Exit delete" : "Enable delete"}</button>
+            <button onClick={() => setShowHideUserMode((s) => !s)} className={`text-sm px-3 py-1 rounded ${showHideUserMode ? "bg-yellow-100 text-yellow-700" : "bg-gray-100 text-gray-700"}`}>{showHideUserMode ? "Exit Hide User" : "Hide User"}</button>
+            <button onClick={() => setShowHiddenList((s) => !s)} className={`text-sm px-3 py-1 rounded ${showHiddenList ? "bg-blue-100 text-blue-700" : "bg-gray-100 text-gray-700"}`}>{showHiddenList ? "Hide List (Close)" : "Show Hide List"}</button>
           </div>
         </div>
         <div className="mb-4">
           <input value={userSearch} onChange={(e) => setUserSearch(e.target.value)} placeholder="Search name or email" className="px-3 py-2 rounded border w-full md:w-72 text-sm" />
         </div>
 
+        {/* Hidden Users List */}
+        {showHiddenList && (
+          <div className="mb-6">
+            <h3 className="text-md font-semibold mb-2">Hidden Users</h3>
+            {hiddenUserIds.length === 0 ? (
+              <p className="text-gray-500">No users are hidden.</p>
+            ) : (
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-100">
+                    <th className="p-2 text-left">Name</th>
+                    <th className="p-2 text-left">Email</th>
+                    <th className="p-2 text-left">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.filter((u) => hiddenUserIds.includes(u.id)).map((u) => (
+                    <tr key={u.id} className="border-b hover:bg-gray-50">
+                      <td className="p-2">{u.name || "-"}</td>
+                      <td className="p-2">{u.email}</td>
+                      <td className="p-2">
+                        <button onClick={() => unhideUser(u.id)} className="text-sm bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded">Unhide</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {/* Visible Users Table */}
         {loading ? <p>Loading...</p> : (() => {
           const q = (userSearch || '').trim().toLowerCase();
-          const visibleUsers = q === '' ? users : users.filter((u) => {
+          // Only show users not hidden
+          const filteredUsers = users.filter((u) => !hiddenUserIds.includes(u.id));
+          const visibleUsers = q === '' ? filteredUsers : filteredUsers.filter((u) => {
             return (u.name && u.name.toLowerCase().includes(q)) || (u.email && u.email.toLowerCase().includes(q));
           });
 
@@ -1275,6 +1368,7 @@ export default function AdminDashboard() {
                   <th className="p-2 text-left">Email</th>
                   <th className="p-2 text-left">Role</th>
                   {showDeleteUsers && <th className="p-2 text-left">Action</th>}
+                  {showHideUserMode && <th className="p-2 text-left">Hide</th>}
                 </tr>
               </thead>
               <tbody>
@@ -1286,6 +1380,11 @@ export default function AdminDashboard() {
                     {showDeleteUsers && (
                       <td className="p-2">
                         <button onClick={() => deleteUser(u.id, u.name || u.email, u.email)} className="text-sm bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded">Delete</button>
+                      </td>
+                    )}
+                    {showHideUserMode && (
+                      <td className="p-2">
+                        <button onClick={() => hideUser(u.id)} className="text-sm bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1 rounded">Hide</button>
                       </td>
                     )}
                   </tr>
@@ -1320,7 +1419,9 @@ export default function AdminDashboard() {
           <p>Loading...</p>
         ) : (
           (() => {
+            // Only show tasks not assigned to hidden users
             const filtered = tasks.filter((task) => {
+              if (hiddenUserIds.includes(task.assignedTo)) return false;
               const nameMatch =
                 filterName.trim() === "" ||
                 (task.assignedName && task.assignedName.toLowerCase().includes(filterName.toLowerCase())) ||
